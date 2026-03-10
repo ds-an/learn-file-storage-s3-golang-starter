@@ -5,15 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"math"
 	"mime"
 	"net/http"
 	"os"
 	"os/exec"
-	"path"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -83,20 +81,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	defer tempFile.Close()
 	defer os.Remove(tempFile.Name())
 
-	videoAspectRatio, err := getVideoAspectRatio(tempFile.Name())
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error getting video aspect ratio", err)
-		return
-	}
-	switch videoAspectRatio {
-	case "16:9":
-		videoAspectRatio = "landscape"
-	case "9:16":
-		videoAspectRatio = "portrait"
-	default:
-		videoAspectRatio = "other"
-	}
-
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error setting temporary file's pointer to the beginning", err)
 		return
@@ -106,10 +90,9 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	rand.Read(randBytes)
 	idString := hex.EncodeToString(randBytes)
 	fileVideoName := fmt.Sprintf("%s.mp4", idString)
-	key := path.Join(videoAspectRatio, fileVideoName)
 	putObjectParams := s3.PutObjectInput{
 		Bucket: &cfg.s3Bucket,
-		Key: &key,
+		Key: &fileVideoName,
 		Body: tempFile,
 		ContentType: &mediaTypeSeparate,
 	}
@@ -120,7 +103,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s/%s", cfg.s3Bucket, cfg.s3Region, videoAspectRatio, fileVideoName)
+	videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, fileVideoName)
 	video.VideoURL = &videoURL
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
@@ -147,19 +130,11 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	if err := json.Unmarshal(out.Bytes(), &videoAspectRatio); err != nil {
 		return "", err
 	}
-	if len(videoAspectRatio.Streams) == 0 {
-		return "", errors.New("no streams found in ffprobe output")
-	}
-
-	width := videoAspectRatio.Streams[0].Width
-	height := videoAspectRatio.Streams[0].Height
-	ratio := float64(width) / float64(height)
-
-	if math.Abs(ratio - 16.0/9.0) < 0.01 {
+	if videoAspectRatio.Streams[0].Width * 9 == videoAspectRatio.Streams[0].Height * 16 {
 		return "16:9", nil
 	}
-	if math.Abs(ratio - 9.0/16.0) < 0.01 {
+	if videoAspectRatio.Streams[0].Height * 9 == videoAspectRatio.Streams[0].Width * 16 {
 		return "9:16", nil
 	}
-	return "other", nil
+	return "", nil
 }
